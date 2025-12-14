@@ -7,3 +7,32 @@ edition = "2024"
 anyhow = "1"
 rustls = { version = "0.23", features = ["aws-lc-rs", "log"] }
 webpki-roots = "1"
+io-uring = { version = "0.7", optional = true }
+libc = { version = "0.2", optional = true }
+
+[features]
+blocking = []
+poll = ["dep:libc"]
+io-uring = ["dep:io-uring", "dep:libc"]
+
+
+[[bin]]
+name = "blocking"
+test = false
+bench = false
+path = "bin/request.rs"
+required-features = ["blocking"]
+
+[[bin]]
+name = "poll"
+test = false
+bench = false
+path = "bin/request.rs"
+required-features = ["poll"]
+
+[[bin]]
+name = "io-uring"
+test = false
+bench = false
+path = "bin/request.rs"
+required-features = ["io-uring"]

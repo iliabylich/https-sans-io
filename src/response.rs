@@ -20,8 +20,7 @@ impl Response {
 
         let status = status
             .split(" ")
-            .skip(1)
-            .next()
+            .nth(1)
             .context("malformed status line")?
             .parse::<u16>()
             .context("non-numeric HTTP status")?;

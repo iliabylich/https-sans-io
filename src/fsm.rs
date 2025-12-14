@@ -15,10 +15,10 @@ pub struct FSM {
     response: Vec<u8>,
 
     incoming_tls: Vec<u8>,
-    outgoing_tls: Vec<u8>,
-
     incoming_start: usize,
     incoming_end: usize,
+
+    outgoing_tls: Vec<u8>,
     outgoing_start: usize,
     outgoing_end: usize,
 
@@ -41,10 +41,10 @@ impl FSM {
             response: vec![],
 
             incoming_tls: vec![0; INCOMING_TLS_BUFSIZE],
-            outgoing_tls: vec![0; OUTGOING_TLS_INITIAL_BUFSIZE],
-
             incoming_start: 0,
             incoming_end: 0,
+
+            outgoing_tls: vec![0; OUTGOING_TLS_INITIAL_BUFSIZE],
             outgoing_start: 0,
             outgoing_end: 0,
 
@@ -56,11 +56,6 @@ impl FSM {
 
     pub fn wants(&mut self) -> Result<Wants<'_>> {
         loop {
-            println!(
-                "Process TLS records: {:?}",
-                &self.incoming_tls[self.incoming_start..self.incoming_end].len()
-            );
-
             let UnbufferedStatus { discard, state } = self.conn.process_tls_records(
                 &mut self.incoming_tls[self.incoming_start..self.incoming_end],
             );
@@ -69,15 +64,13 @@ impl FSM {
 
             let state = state.context("malformed internal state")?;
 
-            match dbg!(state) {
+            match state {
                 ConnectionState::ReadTraffic(mut state) => {
                     while let Some(res) = state.next_record() {
                         let AppDataRecord { discard, payload } =
                             res.context("failed to get AppDataRecord")?;
 
                         self.incoming_start += discard;
-
-                        println!("Received {}", String::from_utf8_lossy(payload));
 
                         self.response.extend_from_slice(payload);
 
@@ -106,16 +99,14 @@ impl FSM {
                 }
 
                 ConnectionState::TransmitTlsData(mut state) => {
-                    if let Some(mut may_encrypt) = state.may_encrypt_app_data() {
-                        if !self.sent_request {
-                            // let request = make_request(SERVER_NAME);
-                            let written = may_encrypt
-                                .encrypt(&self.request, &mut self.outgoing_tls[self.outgoing_end..])
-                                .context("encrypted request does not fit in `outgoing_tls`")?;
-                            self.outgoing_end += written;
-                            self.sent_request = true;
-                            eprintln!("queued HTTP request");
-                        }
+                    if let Some(mut may_encrypt) = state.may_encrypt_app_data()
+                        && !self.sent_request
+                    {
+                        let written = may_encrypt
+                            .encrypt(&self.request, &mut self.outgoing_tls[self.outgoing_end..])
+                            .context("encrypted request does not fit in `outgoing_tls`")?;
+                        self.outgoing_end += written;
+                        self.sent_request = true;
                     }
 
                     if self.outgoing_start == self.outgoing_end {
@@ -139,7 +130,6 @@ impl FSM {
                         //     .context("encrypted request does not fit in `outgoing_tls`")?;
                         // self.outgoing_end += written;
                         // self.sent_request = true;
-                        // eprintln!("queued HTTP request");
 
                         // todo!();
                         // // send_tls(&mut sock, outgoing_tls, &mut outgoing_end)?;
@@ -191,7 +181,6 @@ impl FSM {
                     assert!(self.sent_request);
                     assert!(self.received_response);
                     assert_eq!(self.incoming_start, self.incoming_end);
-                    assert_eq!(0, self.outgoing_end);
 
                     let response = std::mem::take(&mut self.response);
                     let response = Response::parse(response)?;
@@ -207,7 +196,6 @@ impl FSM {
         if self.incoming_end == self.incoming_tls.len() {
             let new_len = self.incoming_tls.len() + INCOMING_TLS_BUFSIZE;
             self.incoming_tls.resize(new_len, 0);
-            eprintln!("grew buffer to {} bytes", new_len);
         }
     }
 
