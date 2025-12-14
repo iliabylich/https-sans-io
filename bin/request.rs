@@ -61,7 +61,20 @@ fn main() -> Result<()> {
     use io_uring::IoUring;
 
     let mut ring = IoUring::new(10)?;
-    let mut conn = IoUringConnection::get("myip.ibylich.dev", 443, "/")?;
+
+    const SOCKET_USER_DATA: u64 = 1;
+    const CONNECT_USER_DATA: u64 = 2;
+    const READ_USER_DATA: u64 = 3;
+    const WRITE_USER_DATA: u64 = 4;
+    let mut conn = IoUringConnection::get(
+        "myip.ibylich.dev",
+        443,
+        "/",
+        SOCKET_USER_DATA,
+        CONNECT_USER_DATA,
+        READ_USER_DATA,
+        WRITE_USER_DATA,
+    )?;
 
     let response = loop {
         match conn.next_sqe()? {

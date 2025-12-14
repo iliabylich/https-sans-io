@@ -10,22 +10,28 @@ use std::{
 };
 
 #[derive(Default)]
-pub enum IoUringConnection {
+enum State {
     Initialized {
-        fsm: FSM,
         addr: sockaddr_in,
     },
     Connecting {
-        fsm: FSM,
         fd: i32,
         addr: sockaddr_in,
     },
     Connected {
-        fsm: FSM,
         fd: i32,
     },
     #[default]
     None,
+}
+
+pub struct IoUringConnection {
+    fsm: FSM,
+    state: State,
+    socket_user_data: u64,
+    connect_user_data: u64,
+    read_user_data: u64,
+    write_user_data: u64,
 }
 
 pub enum SqeOrResponse {
@@ -34,7 +40,15 @@ pub enum SqeOrResponse {
 }
 
 impl IoUringConnection {
-    pub fn get(hostname: &str, port: u16, path: &str) -> Result<Self> {
+    pub fn get(
+        hostname: &str,
+        port: u16,
+        path: &str,
+        socket_user_data: u64,
+        connect_user_data: u64,
+        read_user_data: u64,
+        write_user_data: u64,
+    ) -> Result<Self> {
         let fsm = {
             let server_name = ServerName::try_from(hostname)?.to_owned();
 
@@ -48,66 +62,75 @@ impl IoUringConnection {
         let mut addr = getaddrinfo(hostname)?;
         addr.sin_port = port.to_be();
 
-        Ok(Self::Initialized { fsm, addr })
+        Ok(Self {
+            fsm,
+            state: State::Initialized { addr },
+            socket_user_data,
+            connect_user_data,
+            read_user_data,
+            write_user_data,
+        })
     }
 
     pub fn next_sqe(&mut self) -> Result<SqeOrResponse> {
-        match self {
-            Self::Initialized { .. } => Ok(SqeOrResponse::Sqe(socket_sqe())),
-            Self::Connecting { fd, addr, .. } => Ok(SqeOrResponse::Sqe(connect_sqe(*fd, addr))),
-            Self::Connected { fsm, fd } => match fsm.wants()? {
-                Wants::Read(buf) => Ok(SqeOrResponse::Sqe(read_sqe(*fd, buf))),
-                Wants::Write(buf) => Ok(SqeOrResponse::Sqe(write_sqe(*fd, buf))),
+        match &self.state {
+            State::Initialized { .. } => Ok(SqeOrResponse::Sqe(socket_sqe(self.socket_user_data))),
+            State::Connecting { fd, addr, .. } => Ok(SqeOrResponse::Sqe(connect_sqe(
+                *fd,
+                addr,
+                self.connect_user_data,
+            ))),
+            State::Connected { fd } => match self.fsm.wants()? {
+                Wants::Read(buf) => Ok(SqeOrResponse::Sqe(read_sqe(*fd, buf, self.read_user_data))),
+                Wants::Write(buf) => Ok(SqeOrResponse::Sqe(write_sqe(
+                    *fd,
+                    buf,
+                    self.write_user_data,
+                ))),
                 Wants::Done(response) => Ok(SqeOrResponse::Response(response)),
             },
-            Self::None => unreachable!(),
+            State::None => unreachable!(),
         }
     }
 
-    fn take(&mut self) -> Self {
-        std::mem::take(self)
+    fn take_state(&mut self) -> State {
+        std::mem::take(&mut self.state)
     }
 
     pub fn process_cqe(&mut self, cqe: Cqe) -> Result<()> {
         match cqe.user_data() {
-            SOCKET_USER_DATA => {
+            data if data == self.socket_user_data => {
                 let fd = cqe.result();
                 assert!(fd > 0);
 
-                let Self::Initialized { fsm, addr } = self.take() else {
+                let State::Initialized { addr } = self.take_state() else {
                     panic!("malformed state")
                 };
 
-                *self = Self::Connecting { fsm, fd, addr };
+                self.state = State::Connecting { fd, addr };
             }
-            CONNECT_USER_DATA => {
+            data if data == self.connect_user_data => {
                 assert!(cqe.result() >= 0);
 
-                let Self::Connecting { fsm, fd, .. } = self.take() else {
+                let State::Connecting { fd, .. } = self.take_state() else {
                     panic!("malformed state")
                 };
 
-                *self = Self::Connected { fsm, fd };
+                self.state = State::Connected { fd };
             }
-            READ_USER_DATA => {
+            data if data == self.read_user_data => {
                 let read = cqe.result();
                 assert!(read >= 0);
                 let read = read as usize;
 
-                let Self::Connected { fsm, .. } = self else {
-                    panic!("malformed state");
-                };
-                fsm.done_reading(read);
+                self.fsm.done_reading(read);
             }
-            WRITE_USER_DATA => {
+            data if data == self.write_user_data => {
                 let written = cqe.result();
                 assert!(written >= 0);
                 let written = written as usize;
 
-                let Self::Connected { fsm, .. } = self else {
-                    panic!("malformed state");
-                };
-                fsm.done_writing(written);
+                self.fsm.done_writing(written);
             }
 
             _ => {}
@@ -145,35 +168,30 @@ fn getaddrinfo(hostname: &str) -> Result<sockaddr_in> {
     bail!("failed to resolve DNS name: {hostname}")
 }
 
-const SOCKET_USER_DATA: u64 = 1;
-const CONNECT_USER_DATA: u64 = 2;
-const READ_USER_DATA: u64 = 3;
-const WRITE_USER_DATA: u64 = 4;
-
-fn socket_sqe() -> Sqe {
+fn socket_sqe(user_data: u64) -> Sqe {
     opcode::Socket::new(AF_INET, SOCK_STREAM, 0)
         .build()
-        .user_data(SOCKET_USER_DATA)
+        .user_data(user_data)
 }
 
-fn connect_sqe(fd: i32, addr: *const sockaddr_in) -> Sqe {
+fn connect_sqe(fd: i32, addr: *const sockaddr_in, user_data: u64) -> Sqe {
     opcode::Connect::new(
         types::Fd(fd),
         addr.cast::<sockaddr>(),
         std::mem::size_of::<sockaddr_in>() as u32,
     )
     .build()
-    .user_data(CONNECT_USER_DATA)
+    .user_data(user_data)
 }
 
-fn write_sqe(fd: i32, buf: &[u8]) -> Sqe {
+fn write_sqe(fd: i32, buf: &[u8], user_data: u64) -> Sqe {
     opcode::Write::new(types::Fd(fd), buf.as_ptr(), buf.len() as u32)
         .build()
-        .user_data(WRITE_USER_DATA)
+        .user_data(user_data)
 }
 
-fn read_sqe(fd: i32, buf: &mut [u8]) -> Sqe {
+fn read_sqe(fd: i32, buf: &mut [u8], user_data: u64) -> Sqe {
     opcode::Read::new(types::Fd(fd), buf.as_mut_ptr(), buf.len() as u32)
         .build()
-        .user_data(READ_USER_DATA)
+        .user_data(user_data)
 }
