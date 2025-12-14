@@ -4,7 +4,7 @@ use anyhow::Result;
 fn main() -> Result<()> {
     println!("Blocking version");
 
-    use https_sansio::BlockingConnection;
+    use https_sans_io::BlockingConnection;
     let response = BlockingConnection::get("myip.ibylich.dev", 443, "/")?;
     println!("Response: {response:?}");
     Ok(())
@@ -14,7 +14,7 @@ fn main() -> Result<()> {
 fn main() -> Result<()> {
     println!("Poll version");
 
-    use https_sansio::{EventsOrResponse, PollConnection};
+    use https_sans_io::{EventsOrResponse, PollConnection};
     let mut conn = PollConnection::get("myip.ibylich.dev", 443, "/")?;
 
     use libc::{POLLERR, POLLIN, POLLOUT, poll, pollfd};
@@ -57,7 +57,7 @@ fn main() -> Result<()> {
 fn main() -> Result<()> {
     println!("io_uring version");
 
-    use https_sansio::{IoUringConnection, SqeOrResponse};
+    use https_sans_io::{IoUringConnection, SqeOrResponse};
     use io_uring::IoUring;
 
     let mut ring = IoUring::new(10)?;

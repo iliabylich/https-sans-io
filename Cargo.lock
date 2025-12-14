@@ -105,7 +105,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "https-sansio"
+name = "https-sans-io"
 version = "0.1.0"
 dependencies = [
  "anyhow",
