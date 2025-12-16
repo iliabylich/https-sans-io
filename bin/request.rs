@@ -57,7 +57,7 @@ fn main() -> Result<()> {
 fn main() -> Result<()> {
     println!("io_uring version");
 
-    use https_sans_io::{Cqe, IoUringConnection, Sqe, SqeOrResponse};
+    use https_sans_io::{Cqe, IoUringConnection, Sqe};
     use io_uring::{IoUring, opcode, types};
 
     let mut ring = IoUring::new(10)?;
@@ -121,11 +121,12 @@ fn main() -> Result<()> {
     }
 
     let response = loop {
-        match conn.next_sqe()? {
-            SqeOrResponse::Sqe(sqe) => {
-                unsafe { ring.submission().push(&map_sqe(sqe))? };
-            }
-            SqeOrResponse::Response(response) => break response,
+        let (sqe, response) = conn.next_sqe()?;
+        if let Some(response) = response {
+            break response;
+        }
+        if let Some(sqe) = sqe {
+            unsafe { ring.submission().push(&map_sqe(sqe))? };
         }
 
         ring.submit_and_wait(1)?;

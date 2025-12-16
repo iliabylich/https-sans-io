@@ -3,6 +3,7 @@ use anyhow::{Result, bail};
 use libc::{AF_INET, SOCK_STREAM, addrinfo, freeaddrinfo, gai_strerror, sockaddr, sockaddr_in};
 use rustls::pki_types::ServerName;
 use std::{
+    collections::HashSet,
     ffi::{CStr, CString},
     mem::MaybeUninit,
     ptr::null_mut,
@@ -31,11 +32,7 @@ pub struct IoUringConnection {
     connect_user_data: u64,
     read_user_data: u64,
     write_user_data: u64,
-}
-
-pub enum SqeOrResponse {
-    Sqe(Sqe),
-    Response(Response),
+    pending: HashSet<u64>,
 }
 
 impl IoUringConnection {
@@ -68,28 +65,40 @@ impl IoUringConnection {
             connect_user_data,
             read_user_data,
             write_user_data,
+            pending: HashSet::new(),
         })
     }
 
-    pub fn next_sqe(&mut self) -> Result<SqeOrResponse> {
+    pub fn next_sqe(&mut self) -> Result<(Option<Sqe>, Option<Response>)> {
+        let sqe;
+
         match &self.state {
-            State::Initialized { .. } => Ok(SqeOrResponse::Sqe(socket_sqe(self.socket_user_data))),
-            State::Connecting { fd, addr, .. } => Ok(SqeOrResponse::Sqe(connect_sqe(
-                *fd,
-                addr,
-                self.connect_user_data,
-            ))),
+            State::Initialized { .. } => {
+                sqe = socket_sqe(self.socket_user_data);
+            }
+            State::Connecting { fd, addr, .. } => {
+                sqe = connect_sqe(*fd, addr, self.connect_user_data);
+            }
             State::Connected { fd } => match self.fsm.wants()? {
-                Wants::Read(buf) => Ok(SqeOrResponse::Sqe(read_sqe(*fd, buf, self.read_user_data))),
-                Wants::Write(buf) => Ok(SqeOrResponse::Sqe(write_sqe(
-                    *fd,
-                    buf,
-                    self.write_user_data,
-                ))),
-                Wants::Done(response) => Ok(SqeOrResponse::Response(response)),
+                Wants::Read(buf) => {
+                    sqe = read_sqe(*fd, buf, self.read_user_data);
+                }
+                Wants::Write(buf) => {
+                    sqe = write_sqe(*fd, buf, self.write_user_data);
+                }
+                Wants::Done(response) => {
+                    return Ok((None, Some(response)));
+                }
             },
             State::None => unreachable!(),
         }
+
+        if self.pending.contains(&sqe.user_data()) {
+            return Ok((None, None));
+        }
+        self.pending.insert(sqe.user_data());
+
+        Ok((Some(sqe), None))
     }
 
     fn take_state(&mut self) -> State {
@@ -97,6 +106,8 @@ impl IoUringConnection {
     }
 
     pub fn process_cqe(&mut self, cqe: Cqe) -> Result<()> {
+        self.pending.remove(&cqe.user_data);
+
         match cqe.user_data {
             data if data == self.socket_user_data => {
                 let fd = cqe.result;
@@ -196,6 +207,17 @@ pub enum Sqe {
         len: u32,
         user_data: u64,
     },
+}
+
+impl Sqe {
+    fn user_data(self) -> u64 {
+        match self {
+            Self::Socket { user_data, .. }
+            | Self::Connect { user_data, .. }
+            | Self::Write { user_data, .. }
+            | Self::Read { user_data, .. } => user_data,
+        }
+    }
 }
 
 fn socket_sqe(user_data: u64) -> Sqe {
