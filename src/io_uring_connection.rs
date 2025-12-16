@@ -1,6 +1,5 @@
 use crate::{FSM, Request, Response, Wants};
 use anyhow::{Result, bail};
-use io_uring::{cqueue::Entry as Cqe, opcode, squeue::Entry as Sqe, types};
 use libc::{AF_INET, SOCK_STREAM, addrinfo, freeaddrinfo, gai_strerror, sockaddr, sockaddr_in};
 use rustls::pki_types::ServerName;
 use std::{
@@ -98,9 +97,9 @@ impl IoUringConnection {
     }
 
     pub fn process_cqe(&mut self, cqe: Cqe) -> Result<()> {
-        match cqe.user_data() {
+        match cqe.user_data {
             data if data == self.socket_user_data => {
-                let fd = cqe.result();
+                let fd = cqe.result;
                 assert!(fd > 0);
 
                 let State::Initialized { addr } = self.take_state() else {
@@ -110,7 +109,7 @@ impl IoUringConnection {
                 self.state = State::Connecting { fd, addr };
             }
             data if data == self.connect_user_data => {
-                assert!(cqe.result() >= 0);
+                assert!(cqe.result >= 0);
 
                 let State::Connecting { fd, .. } = self.take_state() else {
                     panic!("malformed state")
@@ -119,14 +118,14 @@ impl IoUringConnection {
                 self.state = State::Connected { fd };
             }
             data if data == self.read_user_data => {
-                let read = cqe.result();
+                let read = cqe.result;
                 assert!(read >= 0);
                 let read = read as usize;
 
                 self.fsm.done_reading(read);
             }
             data if data == self.write_user_data => {
-                let written = cqe.result();
+                let written = cqe.result;
                 assert!(written >= 0);
                 let written = written as usize;
 
@@ -168,30 +167,75 @@ fn getaddrinfo(hostname: &str) -> Result<sockaddr_in> {
     bail!("failed to resolve DNS name: {hostname}")
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+pub enum Sqe {
+    Socket {
+        domain: i32,
+        socket_type: i32,
+        protocol: i32,
+        user_data: u64,
+    },
+
+    Connect {
+        fd: i32,
+        addr: *const sockaddr,
+        addrlen: u32,
+        user_data: u64,
+    },
+
+    Write {
+        fd: i32,
+        buf: *const u8,
+        len: u32,
+        user_data: u64,
+    },
+
+    Read {
+        fd: i32,
+        buf: *mut u8,
+        len: u32,
+        user_data: u64,
+    },
+}
+
 fn socket_sqe(user_data: u64) -> Sqe {
-    opcode::Socket::new(AF_INET, SOCK_STREAM, 0)
-        .build()
-        .user_data(user_data)
+    Sqe::Socket {
+        domain: AF_INET,
+        socket_type: SOCK_STREAM,
+        protocol: 0,
+        user_data,
+    }
 }
 
 fn connect_sqe(fd: i32, addr: *const sockaddr_in, user_data: u64) -> Sqe {
-    opcode::Connect::new(
-        types::Fd(fd),
-        addr.cast::<sockaddr>(),
-        std::mem::size_of::<sockaddr_in>() as u32,
-    )
-    .build()
-    .user_data(user_data)
+    Sqe::Connect {
+        fd,
+        addr: addr.cast::<sockaddr>(),
+        addrlen: std::mem::size_of::<sockaddr_in>() as u32,
+        user_data,
+    }
 }
 
 fn write_sqe(fd: i32, buf: &[u8], user_data: u64) -> Sqe {
-    opcode::Write::new(types::Fd(fd), buf.as_ptr(), buf.len() as u32)
-        .build()
-        .user_data(user_data)
+    Sqe::Write {
+        fd,
+        buf: buf.as_ptr(),
+        len: buf.len() as u32,
+        user_data,
+    }
 }
 
 fn read_sqe(fd: i32, buf: &mut [u8], user_data: u64) -> Sqe {
-    opcode::Read::new(types::Fd(fd), buf.as_mut_ptr(), buf.len() as u32)
-        .build()
-        .user_data(user_data)
+    Sqe::Read {
+        fd,
+        buf: buf.as_mut_ptr(),
+        len: buf.len() as u32,
+        user_data,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Cqe {
+    pub result: i32,
+    pub user_data: u64,
 }

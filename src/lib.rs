@@ -22,4 +22,4 @@ pub use poll_connection::{EventsOrResponse, PollConnection};
 #[cfg(feature = "io-uring")]
 mod io_uring_connection;
 #[cfg(feature = "io-uring")]
-pub use io_uring_connection::{IoUringConnection, SqeOrResponse};
+pub use io_uring_connection::{Cqe, IoUringConnection, Sqe, SqeOrResponse};

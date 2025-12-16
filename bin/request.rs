@@ -53,12 +53,12 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "io-uring")]
+#[cfg(feature = "io-uring-with-dep")]
 fn main() -> Result<()> {
     println!("io_uring version");
 
-    use https_sans_io::{IoUringConnection, SqeOrResponse};
-    use io_uring::IoUring;
+    use https_sans_io::{Cqe, IoUringConnection, Sqe, SqeOrResponse};
+    use io_uring::{IoUring, opcode, types};
 
     let mut ring = IoUring::new(10)?;
 
@@ -76,10 +76,54 @@ fn main() -> Result<()> {
         WRITE_USER_DATA,
     )?;
 
+    fn map_sqe(sqe: Sqe) -> io_uring::squeue::Entry {
+        match sqe {
+            Sqe::Socket {
+                domain,
+                socket_type,
+                protocol,
+                user_data,
+            } => opcode::Socket::new(domain, socket_type, protocol)
+                .build()
+                .user_data(user_data),
+            Sqe::Connect {
+                fd,
+                addr,
+                addrlen,
+                user_data,
+            } => opcode::Connect::new(types::Fd(fd), addr, addrlen)
+                .build()
+                .user_data(user_data),
+            Sqe::Write {
+                fd,
+                buf,
+                len,
+                user_data,
+            } => opcode::Write::new(types::Fd(fd), buf, len)
+                .build()
+                .user_data(user_data),
+            Sqe::Read {
+                fd,
+                buf,
+                len,
+                user_data,
+            } => opcode::Read::new(types::Fd(fd), buf, len)
+                .build()
+                .user_data(user_data),
+        }
+    }
+
+    fn map_cqe(cqe: io_uring::cqueue::Entry) -> Cqe {
+        Cqe {
+            result: cqe.result(),
+            user_data: cqe.user_data(),
+        }
+    }
+
     let response = loop {
         match conn.next_sqe()? {
             SqeOrResponse::Sqe(sqe) => {
-                unsafe { ring.submission().push(&sqe)? };
+                unsafe { ring.submission().push(&map_sqe(sqe))? };
             }
             SqeOrResponse::Response(response) => break response,
         }
@@ -87,7 +131,7 @@ fn main() -> Result<()> {
         ring.submit_and_wait(1)?;
 
         while let Some(cqe) = ring.completion().next() {
-            conn.process_cqe(cqe)?;
+            conn.process_cqe(map_cqe(cqe))?;
         }
     };
 
